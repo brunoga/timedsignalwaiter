@@ -1,4 +1,4 @@
-package broadcaster
+package timedsignalwaiter
 
 import (
 	"fmt"
