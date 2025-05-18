@@ -479,7 +479,7 @@ func TestSignalWaiter_SingleSignaler_ManyResponsiveWaiters(t *testing.T) {
 	}
 
 	if expectedTotalAttempts > 0 {
-		// Define a strict threshold for timeouts. Your original test implied 0.
+		// Define a strict threshold for timeouts.
 		// Let's allow a very small number, e.g., less than 0.5% of attempts, or a small absolute number.
 		maxAllowedTimeouts := int64(float64(expectedTotalAttempts) * 0.005) // 0.5%
 		if maxAllowedTimeouts == 0 && expectedTotalAttempts > 0 {           // Ensure at least 1 is allowed if very few attempts
