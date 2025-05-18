@@ -1,3 +1,3 @@
 module github.com/brunoga/timedsignalwaiter
 
-go 1.22.3
+go 1.24.3

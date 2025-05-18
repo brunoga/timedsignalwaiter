@@ -27,10 +27,23 @@ func New(name string) *TimedSignalWaiter {
 // Wait waits for a signal from another goroutine or for a timeout.
 // It returns true if the signal was received, and false if the timeout expired.
 func (b *TimedSignalWaiter) Wait(timeout time.Duration) bool {
+	if timeout <= 0 {
+		// Immediate expiration. Either the channel has been signaled already or
+		// we immediatelly signal a timeout.
+		select {
+		case <-*b.chP.Load():
+			return true
+		default:
+			return false
+		}
+	}
+
 	select {
 	case <-*b.chP.Load():
+		// Signal received.
 		return true
 	case <-time.After(timeout):
+		// Timeout expired.
 		return false
 	}
 }
