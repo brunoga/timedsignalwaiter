@@ -1,6 +1,8 @@
 package timedsignalwaiter
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -48,17 +50,24 @@ func Test_Name(t *testing.T) {
 func TestSignalWaiter_SingleWaiter_ReceivesSignal(t *testing.T) {
 	t.Parallel()
 	b := New("singleSignal")
-	waitResult := make(chan bool, 1)
+	waitResult := make(chan error, 1)
 
 	go func() {
-		waitResult <- b.Wait(1 * time.Second) // Reasonably long timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second) // Reasonably long timeout
+		defer cancel()
+		waitResult <- b.Wait(ctx)
 	}()
 
 	time.Sleep(50 * time.Millisecond) // Give waiter a chance to start
 	b.Signal()
 
-	if !<-waitResult {
-		t.Errorf("Expected Wait() to return true (signal received), got false")
+	select {
+	case err := <-waitResult:
+		if err != nil {
+			t.Errorf("Expected Wait() to return nil (signal received), got %v", err)
+		}
+	case <-time.After(2 * time.Second): // Test timeout
+		t.Fatal("Test timed out waiting for Wait() result")
 	}
 }
 
@@ -68,8 +77,13 @@ func TestSignalWaiter_SingleWaiter_TimeoutOccurs(t *testing.T) {
 	timeoutDuration := 50 * time.Millisecond
 	startTime := time.Now()
 
-	if b.Wait(timeoutDuration) {
-		t.Errorf("Expected Wait() to return false (timeout), got true")
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration)
+	defer cancel()
+	err := b.Wait(ctx)
+	if err == nil {
+		t.Errorf("Expected Wait() to return an error (timeout), got nil")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Expected Wait() to return context.DeadlineExceeded, got %v", err)
 	}
 
 	elapsedTime := time.Since(startTime)
@@ -85,23 +99,26 @@ func TestSignalWaiter_MultipleWaiters_AllReceiveSignal(t *testing.T) {
 	numWaiters := 10
 	var wg sync.WaitGroup
 	wg.Add(numWaiters)
-	results := make(chan bool, numWaiters)
+	results := make(chan error, numWaiters)
 
 	for i := 0; i < numWaiters; i++ {
 		go func() {
 			defer wg.Done()
-			results <- b.Wait(1 * time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+			results <- b.Wait(ctx)
 		}()
 	}
 
 	time.Sleep(50 * time.Millisecond) // Give waiters a chance to start
 	b.Signal()
 	wg.Wait() // Wait for all goroutines to finish
-	close(results)
 
+	// Check results
 	for i := 0; i < numWaiters; i++ {
-		if !<-results {
-			t.Errorf("A waiter timed out, expected all to receive signal")
+		err := <-results
+		if err != nil {
+			t.Errorf("A waiter timed out or got an error (%v), expected all to receive signal (nil error)", err)
 			return // Fail fast
 		}
 	}
@@ -112,8 +129,13 @@ func TestSignalWaiter_SignalBeforeWait_CausesTimeout(t *testing.T) {
 	b := New("signalBeforeWait")
 	b.Signal() // Signal when no one is actively waiting
 
-	if b.Wait(50 * time.Millisecond) {
-		t.Errorf("Expected Wait() to return false (timeout) when signaled before wait, got true")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := b.Wait(ctx)
+	if err == nil {
+		t.Errorf("Expected Wait() to return an error (timeout) when signaled before wait, got nil")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Expected Wait() to return context.DeadlineExceeded, got %v", err)
 	}
 }
 
@@ -121,59 +143,87 @@ func TestSignalWaiter_Reusability_SignalWaitSignalWait(t *testing.T) {
 	t.Parallel()
 	b := New("reuse")
 
-	// First signal, consumed by no one specific (or will be missed by next Wait)
+	// First signal, should be missed by the subsequent Wait if it starts after the signal.
 	b.Signal()
-	if b.Wait(20 * time.Millisecond) { // This should timeout if signal was "missed"
-		t.Logf("First wait after initial signal unexpectedly returned true (might happen if Wait was very fast)")
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel1()
+	err1 := b.Wait(ctx1)
+	if err1 == nil {
+		t.Logf("First wait after initial signal unexpectedly returned nil (signal received). This might happen if Wait was extremely fast relative to Signal's channel swap.")
+	} else if !errors.Is(err1, context.DeadlineExceeded) {
+		t.Errorf("First wait expected context.DeadlineExceeded, got %v", err1)
 	}
 
 	// Second round
-	signalReceived := make(chan bool, 1)
+	signalReceived := make(chan error, 1)
 	go func() {
-		signalReceived <- b.Wait(100 * time.Millisecond)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel2()
+		signalReceived <- b.Wait(ctx2)
 	}()
 
 	time.Sleep(10 * time.Millisecond) // Ensure goroutine is waiting
 	b.Signal()                        // New signal
 
-	if !<-signalReceived {
-		t.Error("Second Wait() call did not receive the new signal")
+	select {
+	case err2 := <-signalReceived:
+		if err2 != nil {
+			t.Errorf("Second Wait() call did not receive the new signal, got error: %v", err2)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Test timed out waiting for second Wait() result")
 	}
 }
 
 func TestSignalWaiter_WaitWithZeroTimeout_NoSignal(t *testing.T) {
 	t.Parallel()
 	b := New("waitZeroNoSignal")
-	if b.Wait(0) {
-		t.Errorf("Expected Wait(0) to return false when no signal pending, got true")
+	ctx, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+	err := b.Wait(ctx)
+	if err == nil {
+		t.Errorf("Expected Wait(ctx_with_zero_timeout) to return an error when no signal pending, got nil")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Expected context.DeadlineExceeded, got %v", err)
 	}
 }
 
 func TestSignalWaiter_WaitWithZeroTimeout_AfterSignalConsumed(t *testing.T) {
 	t.Parallel()
 	b := New("waitZeroAfterConsumed")
-	var wg sync.WaitGroup
-	wg.Add(1)
+	consumerDone := make(chan struct{})
 
 	// Consumer
 	go func() {
-		defer wg.Done()
-		b.Wait(50 * time.Millisecond) // Consumes the signal
+		defer close(consumerDone)
+		ctxConsume, cancelConsume := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancelConsume()
+		_ = b.Wait(ctxConsume) // Consumes the signal, ignore error for this part
 	}()
 	time.Sleep(10 * time.Millisecond) // Let consumer start
 	b.Signal()
-	wg.Wait() // Ensure signal is consumed
+	<-consumerDone // Ensure signal is consumed
 
-	if b.Wait(0) {
-		t.Errorf("Expected Wait(0) to return false on a new channel generation, got true")
+	ctxZero, cancelZero := context.WithTimeout(context.Background(), 0)
+	defer cancelZero()
+	err := b.Wait(ctxZero)
+	if err == nil {
+		t.Errorf("Expected Wait(ctx_with_zero_timeout) to return an error on a new channel generation, got nil")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Expected context.DeadlineExceeded, got %v", err)
 	}
 }
 
 func TestSignalWaiter_WaitWithNegativeTimeout(t *testing.T) {
 	t.Parallel()
 	b := New("waitNegativeTimeout")
-	if b.Wait(-10 * time.Millisecond) {
-		t.Errorf("Expected Wait() with negative timeout to return false, got true")
+	ctx, cancel := context.WithTimeout(context.Background(), -10*time.Millisecond) // Behaves like 0 timeout
+	defer cancel()
+	err := b.Wait(ctx)
+	if err == nil {
+		t.Errorf("Expected Wait() with negative timeout to return an error, got nil")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Expected context.DeadlineExceeded, got %v", err)
 	}
 }
 
@@ -224,7 +274,10 @@ func TestSignalWaiter_ConcurrentSignals_And_Waiters(t *testing.T) {
 					return
 				default:
 					waitsAttempted.Add(1)
-					if b.Wait(waiterAttemptTimeout) {
+					ctx, cancel := context.WithTimeout(context.Background(), waiterAttemptTimeout)
+					err := b.Wait(ctx)
+					cancel() // Important to cancel the context
+					if err == nil {
 						signalsReceivedByWaiter.Add(1)
 					} else {
 						timeoutsOccurredForWaiter.Add(1)
@@ -303,8 +356,8 @@ func TestSignalWaiter_WaiterLeavesAndJoins_DuringSignaling(t *testing.T) {
 		defer managerWg.Done()
 		var activeWaiterInstanceWg sync.WaitGroup // Tracks currently running short-lived waiter instances
 		activeWaiterCount := 0
-		// buffered channel to receive results from one-shot waiter goroutines
-		waiterResultChan := make(chan bool, maxConcurrentWaiters)
+		// buffered channel to receive error results from one-shot waiter goroutines
+		waiterResultChan := make(chan error, maxConcurrentWaiters)
 
 		// Loop until target successful waits is met or overallDone is signaled.
 		for successfulWaitsByLeavingWaiters.Load() < int64(targetSuccessfulWaits) {
@@ -330,16 +383,19 @@ func TestSignalWaiter_WaiterLeavesAndJoins_DuringSignaling(t *testing.T) {
 							return
 						default:
 						}
-						waiterResultChan <- b.Wait(waiterAttemptTimeout)
+						ctx, cancel := context.WithTimeout(context.Background(), waiterAttemptTimeout)
+						// Send the result of b.Wait(ctx) to the channel.
+						// The cancel must be called after b.Wait returns.
+						err := b.Wait(ctx)
+						cancel()
+						waiterResultChan <- err
 					}()
 				}
 
-				// Process results from completed waiters or check for shutdown.
-				// This select needs to be non-blocking if no results are ready, to allow launching more waiters.
 				select {
-				case result := <-waiterResultChan:
+				case errResult := <-waiterResultChan:
 					activeWaiterCount--
-					if result {
+					if errResult == nil {
 						successfulWaitsByLeavingWaiters.Add(1)
 					} else {
 						timeoutsByLeavingWaiters.Add(1)
@@ -444,12 +500,14 @@ func TestSignalWaiter_SingleSignaler_ManyResponsiveWaiters(t *testing.T) {
 			defer waiterWg.Done()
 			for j := 0; j < waitsPerWaiter; j++ {
 				totalWaitAttempts.Add(1)
-				if b.Wait(waiterTimeout) {
+				ctx, cancel := context.WithTimeout(context.Background(), waiterTimeout)
+				err := b.Wait(ctx)
+				cancel()
+				if err == nil {
 					successfulWaitsByWaiters.Add(1)
 				} else {
 					timedOutWaitsByWaiters.Add(1)
-					// Optional: Log the specific timeout for debugging if needed during development
-					// t.Logf("Waiter %d, attempt %d: timed out (wait: %v, signal: %v)",
+					// t.Logf("Waiter %d, attempt %d: timed out with error %v (wait: %v, signal: %v)",
 					//	waiterID, j, waiterTimeout, signalInterval)
 				}
 			}
