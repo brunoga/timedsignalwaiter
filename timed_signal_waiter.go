@@ -6,17 +6,15 @@ import (
 )
 
 // TimedSignalWaiter is a synchronization primitive that allows one or more
-// goroutines to wait for a signal from another goroutine or for a timeout.
+// goroutines to wait for a broadcast signal from another goroutine.
+// The wait operation can be canceled or timed out via a context.Context.
 type TimedSignalWaiter struct {
-	name string
-	chP  atomic.Pointer[chan struct{}]
+	chP atomic.Pointer[chan struct{}]
 }
 
 // New creates a new TimedSignalWaiter.
-func New(name string) *TimedSignalWaiter {
-	b := &TimedSignalWaiter{
-		name: name,
-	}
+func New() *TimedSignalWaiter {
+	b := &TimedSignalWaiter{}
 
 	ch := make(chan struct{})
 	b.chP.Store(&ch)
@@ -24,8 +22,9 @@ func New(name string) *TimedSignalWaiter {
 	return b
 }
 
-// Wait waits for a signal from another goroutine or for a timeout.
-// It returns true if the signal was received, and false if the timeout expired.
+// Wait blocks until a signal is broadcast via the Broadcast method or the
+// provided context is done. It returns nil if a broadcast signal was received,
+// or ctx.Err() if the context was done.
 func (b *TimedSignalWaiter) Wait(ctx context.Context) error {
 	select {
 	case <-*b.chP.Load():
@@ -37,8 +36,9 @@ func (b *TimedSignalWaiter) Wait(ctx context.Context) error {
 	}
 }
 
-// Signal signals all goroutines waiting on the Broadcaster.
-func (b *TimedSignalWaiter) Signal() {
+// Broadcast sends a signal to all goroutines currently waiting on this
+// TimedSignalWaiter.
+func (b *TimedSignalWaiter) Broadcast() {
 	for {
 		new := make(chan struct{})
 		old := b.chP.Load()
@@ -47,9 +47,4 @@ func (b *TimedSignalWaiter) Signal() {
 			break
 		}
 	}
-}
-
-// Name returns the name of the TimedSignalWaiter.
-func (b *TimedSignalWaiter) Name() string {
-	return b.name
 }

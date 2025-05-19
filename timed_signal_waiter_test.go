@@ -9,47 +9,9 @@ import (
 	"time"
 )
 
-func Test_Name(t *testing.T) {
+func TestTimedSignalWaiter_SingleWaiter_ReceivesBroadcast(t *testing.T) {
 	t.Parallel()
-
-	testCases := []struct {
-		desc         string
-		inputName    string
-		expectedName string
-	}{
-		{
-			desc:         "Regular name",
-			inputName:    "MyTestWaiter123",
-			expectedName: "MyTestWaiter123",
-		},
-		{
-			desc:         "Empty name",
-			inputName:    "",
-			expectedName: "",
-		},
-		{
-			desc:         "Name with spaces and special characters",
-			inputName:    "Waiter with ID: @&*% \t\n (end)",
-			expectedName: "Waiter with ID: @&*% \t\n (end)",
-		},
-	}
-
-	for _, tc := range testCases {
-		tc := tc // Capture range variable
-		t.Run(tc.desc, func(t *testing.T) {
-			t.Parallel()
-			waiter := New(tc.inputName)
-			actualName := waiter.Name()
-			if actualName != tc.expectedName {
-				t.Errorf("Name() returned %q, expected %q", actualName, tc.expectedName)
-			}
-		})
-	}
-}
-
-func TestSignalWaiter_SingleWaiter_ReceivesSignal(t *testing.T) {
-	t.Parallel()
-	b := New("singleSignal")
+	b := New()
 	waitResult := make(chan error, 1)
 
 	go func() {
@@ -59,7 +21,7 @@ func TestSignalWaiter_SingleWaiter_ReceivesSignal(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond) // Give waiter a chance to start
-	b.Signal()
+	b.Broadcast()
 
 	select {
 	case err := <-waitResult:
@@ -71,9 +33,9 @@ func TestSignalWaiter_SingleWaiter_ReceivesSignal(t *testing.T) {
 	}
 }
 
-func TestSignalWaiter_SingleWaiter_TimeoutOccurs(t *testing.T) {
+func TestTimedSignalWaiter_SingleWaiter_ContextDeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	b := New("singleTimeout")
+	b := New()
 	timeoutDuration := 50 * time.Millisecond
 	startTime := time.Now()
 
@@ -93,9 +55,9 @@ func TestSignalWaiter_SingleWaiter_TimeoutOccurs(t *testing.T) {
 	}
 }
 
-func TestSignalWaiter_MultipleWaiters_AllReceiveSignal(t *testing.T) {
+func TestTimedSignalWaiter_MultipleWaiters_AllReceiveBroadcast(t *testing.T) {
 	t.Parallel()
-	b := New("multiWaitSignal")
+	b := New()
 	numWaiters := 10
 	var wg sync.WaitGroup
 	wg.Add(numWaiters)
@@ -111,7 +73,7 @@ func TestSignalWaiter_MultipleWaiters_AllReceiveSignal(t *testing.T) {
 	}
 
 	time.Sleep(50 * time.Millisecond) // Give waiters a chance to start
-	b.Signal()
+	b.Broadcast()
 	wg.Wait() // Wait for all goroutines to finish
 
 	// Check results
@@ -124,10 +86,10 @@ func TestSignalWaiter_MultipleWaiters_AllReceiveSignal(t *testing.T) {
 	}
 }
 
-func TestSignalWaiter_SignalBeforeWait_CausesTimeout(t *testing.T) {
+func TestTimedSignalWaiter_BroadcastBeforeWait_ResultsInContextDeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	b := New("signalBeforeWait")
-	b.Signal() // Signal when no one is actively waiting
+	b := New()
+	b.Broadcast() // Signal when no one is actively waiting
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -139,12 +101,12 @@ func TestSignalWaiter_SignalBeforeWait_CausesTimeout(t *testing.T) {
 	}
 }
 
-func TestSignalWaiter_Reusability_SignalWaitSignalWait(t *testing.T) {
+func TestTimedSignalWaiter_Reusability_BroadcastWaitBroadcastWait(t *testing.T) {
 	t.Parallel()
-	b := New("reuse")
+	b := New()
 
 	// First signal, should be missed by the subsequent Wait if it starts after the signal.
-	b.Signal()
+	b.Broadcast()
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel1()
 	err1 := b.Wait(ctx1)
@@ -163,7 +125,7 @@ func TestSignalWaiter_Reusability_SignalWaitSignalWait(t *testing.T) {
 	}()
 
 	time.Sleep(10 * time.Millisecond) // Ensure goroutine is waiting
-	b.Signal()                        // New signal
+	b.Broadcast()                     // New signal
 
 	select {
 	case err2 := <-signalReceived:
@@ -175,9 +137,9 @@ func TestSignalWaiter_Reusability_SignalWaitSignalWait(t *testing.T) {
 	}
 }
 
-func TestSignalWaiter_WaitWithZeroTimeout_NoSignal(t *testing.T) {
+func TestTimedSignalWaiter_WaitWithImmediatelyDoneContext_NoBroadcastPending(t *testing.T) {
 	t.Parallel()
-	b := New("waitZeroNoSignal")
+	b := New()
 	ctx, cancel := context.WithTimeout(context.Background(), 0)
 	defer cancel()
 	err := b.Wait(ctx)
@@ -188,9 +150,9 @@ func TestSignalWaiter_WaitWithZeroTimeout_NoSignal(t *testing.T) {
 	}
 }
 
-func TestSignalWaiter_WaitWithZeroTimeout_AfterSignalConsumed(t *testing.T) {
+func TestTimedSignalWaiter_WaitWithImmediatelyDoneContext_AfterBroadcastConsumed(t *testing.T) {
 	t.Parallel()
-	b := New("waitZeroAfterConsumed")
+	b := New()
 	consumerDone := make(chan struct{})
 
 	// Consumer
@@ -201,7 +163,7 @@ func TestSignalWaiter_WaitWithZeroTimeout_AfterSignalConsumed(t *testing.T) {
 		_ = b.Wait(ctxConsume) // Consumes the signal, ignore error for this part
 	}()
 	time.Sleep(10 * time.Millisecond) // Let consumer start
-	b.Signal()
+	b.Broadcast()
 	<-consumerDone // Ensure signal is consumed
 
 	ctxZero, cancelZero := context.WithTimeout(context.Background(), 0)
@@ -214,9 +176,9 @@ func TestSignalWaiter_WaitWithZeroTimeout_AfterSignalConsumed(t *testing.T) {
 	}
 }
 
-func TestSignalWaiter_WaitWithNegativeTimeout(t *testing.T) {
+func TestTimedSignalWaiter_WaitWithNegativeTimeoutContext_ResultsInContextDeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	b := New("waitNegativeTimeout")
+	b := New()
 	ctx, cancel := context.WithTimeout(context.Background(), -10*time.Millisecond) // Behaves like 0 timeout
 	defer cancel()
 	err := b.Wait(ctx)
@@ -227,10 +189,10 @@ func TestSignalWaiter_WaitWithNegativeTimeout(t *testing.T) {
 	}
 }
 
-func TestSignalWaiter_ConcurrentSignals_And_Waiters(t *testing.T) {
+func TestTimedSignalWaiter_ConcurrentBroadcastsAndWaiters(t *testing.T) {
 	t.Parallel()
 
-	b := New("concurrentSignalWait")
+	b := New()
 	testDuration := 2 * time.Second // How long to run the test
 
 	numSignalers := 5
@@ -255,7 +217,7 @@ func TestSignalWaiter_ConcurrentSignals_And_Waiters(t *testing.T) {
 				case <-done:
 					return
 				default:
-					b.Signal()
+					b.Broadcast()
 					signalsSent.Add(1)
 					// time.Sleep(1 * time.Millisecond) // Optional small delay
 				}
@@ -293,7 +255,7 @@ func TestSignalWaiter_ConcurrentSignals_And_Waiters(t *testing.T) {
 	wg.Wait()   // Wait for them to finish
 
 	// Log statistics
-	t.Logf("TestSignalWaiter_ConcurrentSignals_And_Waiters Stats after %v:", testDuration)
+	t.Logf("TestTimedSignalWaiter_ConcurrentBroadcastsAndWaiters Stats after %v:", testDuration)
 	t.Logf("  Approximate Signals Sent by Signalers: %d", signalsSent.Load())
 	t.Logf("  Wait Attempts by Waiters: %d", waitsAttempted.Load())
 	t.Logf("  Signals Received by Waiters: %d", signalsReceivedByWaiter.Load())
@@ -317,10 +279,10 @@ func TestSignalWaiter_ConcurrentSignals_And_Waiters(t *testing.T) {
 	// The primary check is that the test completes without panicking or deadlocking.
 }
 
-func TestSignalWaiter_WaiterLeavesAndJoins_DuringSignaling(t *testing.T) {
+func TestTimedSignalWaiter_DynamicWaiters_DuringBroadcasting(t *testing.T) {
 	t.Parallel()
 
-	b := New("waiterChurnTest")
+	b := New()
 	overallTestDuration := 3 * time.Second        // Total time the test environment runs for.
 	signalInterval := 15 * time.Millisecond       // How often a signal is broadcast.
 	waiterAttemptTimeout := 60 * time.Millisecond // Timeout for each individual Wait() call.
@@ -345,7 +307,7 @@ func TestSignalWaiter_WaiterLeavesAndJoins_DuringSignaling(t *testing.T) {
 			case <-overallDone:
 				return
 			case <-ticker.C:
-				b.Signal()
+				b.Broadcast()
 			}
 		}
 	}()
@@ -427,11 +389,11 @@ Loop:
 	for {
 		select {
 		case <-testEndTimer.C:
-			t.Logf("TestSignalWaiter_WaiterLeavesAndJoins: Overall test duration (%v) expired.", overallTestDuration)
+			t.Logf("TestTimedSignalWaiter_DynamicWaiters_DuringBroadcasting: Overall test duration (%v) expired.", overallTestDuration)
 			break Loop
 		case <-monitorTicker.C:
 			if successfulWaitsByLeavingWaiters.Load() >= int64(targetSuccessfulWaits) {
-				t.Logf("TestSignalWaiter_WaiterLeavesAndJoins: Target of %d successful waits achieved.", targetSuccessfulWaits)
+				t.Logf("TestTimedSignalWaiter_DynamicWaiters_DuringBroadcasting: Target of %d successful waits achieved.", targetSuccessfulWaits)
 				break Loop
 			}
 		}
@@ -441,7 +403,7 @@ Loop:
 	managerWg.Wait()   // Wait for them to complete their cleanup.
 
 	// Log statistics
-	t.Logf("TestSignalWaiter_WaiterLeavesAndJoins_DuringSignaling Stats:")
+	t.Logf("TestTimedSignalWaiter_DynamicWaiters_DuringBroadcasting Stats:")
 	t.Logf("  Successful Signal Receptions by Leaving Waiters: %d (Target: %d)", successfulWaitsByLeavingWaiters.Load(), targetSuccessfulWaits)
 	t.Logf("  Total Timeouts by Leaving Waiters: %d", timeoutsByLeavingWaiters.Load())
 
@@ -454,10 +416,10 @@ Loop:
 	}
 }
 
-func TestSignalWaiter_SingleSignaler_ManyResponsiveWaiters(t *testing.T) {
+func TestTimedSignalWaiter_SingleBroadcaster_ManyResponsiveWaiters(t *testing.T) {
 	t.Parallel()
 
-	b := New("singleSignalManyResponsiveWaiters")
+	b := New()
 
 	// Configuration
 	numWaiters := 50                        // Number of persistent waiter goroutines
@@ -487,7 +449,7 @@ func TestSignalWaiter_SingleSignaler_ManyResponsiveWaiters(t *testing.T) {
 			case <-signalerDone:
 				return
 			case <-ticker.C:
-				b.Signal()
+				b.Broadcast()
 				signalsSentBySignaler.Add(1)
 			}
 		}
@@ -522,7 +484,7 @@ func TestSignalWaiter_SingleSignaler_ManyResponsiveWaiters(t *testing.T) {
 	signalerWg.Wait() // Wait for signaler to stop
 
 	// Log statistics
-	t.Logf("Test_SingleSignaler_ManyResponsiveWaiters Stats:")
+	t.Logf("TestTimedSignalWaiter_SingleBroadcaster_ManyResponsiveWaiters Stats:")
 	t.Logf("  Signals Sent by Signaler: %d", signalsSentBySignaler.Load())
 	t.Logf("  Total Wait Attempts by Waiters: %d", totalWaitAttempts.Load())
 	t.Logf("  Successful Waits by Waiters: %d", successfulWaitsByWaiters.Load())
