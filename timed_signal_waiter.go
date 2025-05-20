@@ -1,66 +1,32 @@
 package timedsignalwaiter
 
 import (
-	"sync/atomic"
-	"time"
+	"context"
 )
 
-// TimedSignalWaiter is a synchronization primitive that allows one or more
-// goroutines to wait for a signal from another goroutine or for a timeout.
+// TimedSignalWaiter allows goroutines to wait for a broadcast signal.
+// The wait can be timed out or canceled via a context.
 type TimedSignalWaiter struct {
-	name string
-	chP  atomic.Pointer[chan struct{}]
+	resultWaiter *TimedResultWaiter[struct{}]
 }
 
 // New creates a new TimedSignalWaiter.
-func New(name string) *TimedSignalWaiter {
-	b := &TimedSignalWaiter{
-		name: name,
-	}
-
-	ch := make(chan struct{})
-	b.chP.Store(&ch)
-
-	return b
-}
-
-// Wait waits for a signal from another goroutine or for a timeout.
-// It returns true if the signal was received, and false if the timeout expired.
-func (b *TimedSignalWaiter) Wait(timeout time.Duration) bool {
-	if timeout <= 0 {
-		// Immediate expiration. Either the channel has been signaled already or
-		// we immediatelly signal a timeout.
-		select {
-		case <-*b.chP.Load():
-			return true
-		default:
-			return false
-		}
-	}
-
-	select {
-	case <-*b.chP.Load():
-		// Signal received.
-		return true
-	case <-time.After(timeout):
-		// Timeout expired.
-		return false
+func New() *TimedSignalWaiter {
+	return &TimedSignalWaiter{
+		resultWaiter: NewResultWaiter[struct{}](),
 	}
 }
 
-// Signal signals all goroutines waiting on the Broadcaster.
-func (b *TimedSignalWaiter) Signal() {
-	for {
-		new := make(chan struct{})
-		old := b.chP.Load()
-		if b.chP.CompareAndSwap(old, &new) {
-			close(*old)
-			break
-		}
-	}
+// Wait blocks until a signal is broadcast or the context is done.
+// Returns nil on signal, or ctx.Err() if context is done.
+func (b *TimedSignalWaiter) Wait(ctx context.Context) error {
+	// Wait on the internal resultWaiter. The actual result (struct{}{}) is ignored.
+	_, err := b.resultWaiter.Wait(ctx)
+	return err
 }
 
-// Name returns the name of the TimedSignalWaiter.
-func (b *TimedSignalWaiter) Name() string {
-	return b.name
+// Broadcast sends a signal to all waiting goroutines.
+func (b *TimedSignalWaiter) Broadcast() {
+	// Broadcast a placeholder value.
+	b.resultWaiter.Broadcast(struct{}{})
 }
